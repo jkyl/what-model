@@ -1,0 +1,29 @@
+data:
+  batch_size: 4
+  length: 4096
+  num_threads: 4
+  max_queue_length: 16
+
+model:
+  ch: 16
+  depth: 10
+  num_blocks: 1
+  kernel_size: 3
+  embedding_dim: 32
+
+optimizer:
+  type: adam
+  learning_rate: 1e-3
+  b1: 0.9
+  b2: 0.999
+  eps: 1e-5
+
+training:
+  num_iters: 100000
+  log_interval: 100
+  val_interval: 1000
+
+rngs:
+  init: 47
+  data: 420
+  val: 69
