@@ -36,31 +36,34 @@ class TrainState(train_state.TrainState):
     def net(self):
         return self.apply_fn.__self__
 
-    def inference(self, xt, t):
-        return self.apply_fn({"params": self.params, "batch_stats": self.batch_stats}, xt, t, train=False)
-
 
 @jax.jit
-def apply_model(
+def apply_model_train(
     state: TrainState,
     xt: jax.Array,
     t: jax.Array,
-    v: jax.Array,
+    vt: jax.Array,
 ) -> Tuple[jax.Array, ...]:
 
     def compute_loss(params):
-        v_pred, updates = state.apply_fn(
+        vt_pred, updates = state.apply_fn(
             {"params": params, "batch_stats": state.batch_stats},
             xt, t,
             train=True,
             mutable=["batch_stats"],
         )
-        loss = jnp.mean((v_pred - v[:, state.net.p:-state.net.p]) ** 2)
-        return loss, (v_pred, updates)
+        cropped_vt = vt[:, state.net.p:-state.net.p]
+        loss = jnp.mean((vt_pred - cropped_vt) ** 2)
+        return loss, (vt_pred, updates)
 
     grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
-    (loss, (v_pred, updates)), grads = grad_fn(state.params)
-    return grads, loss, v_pred, updates
+    (loss, (vt_pred, updates)), grads = grad_fn(state.params)
+    return grads, loss, vt_pred, updates
+
+
+@jax.jit
+def apply_model_inference(state: TrainState, xt: jax.Array, t: jax.Array) -> jax.Array:
+    return state.apply_fn({"params": state.params, "batch_stats": state.batch_stats}, xt, t, train=False)
 
 
 @jax.jit
@@ -76,7 +79,7 @@ def train_step(
     t: jax.Array,
     v: jax.Array,
 ) -> Tuple[TrainState, jax.Array]:
-    grads, loss, e_pred, updates = apply_model(state, xt, t, v)
+    grads, loss, e_pred, updates = apply_model_train(state, xt, t, v)
     state = update_model(state, grads, updates)
     return state, loss
 
@@ -126,12 +129,11 @@ def main(config: DictConfig):
                 print("generating")
                 x0_pred = diffusion_sampling(
                     rng=val_rng,
-                    model=state.inference,
+                    model=lambda xt, t: apply_model_inference(state, xt, t),
                     xt=jax.random.normal(val_rng, (1, state.net.pad * 10 + 256, 1)),
                     num_steps=10,
                     eta=0,
                 )
-                print("drawing")
                 line.set_ydata(x0_pred.squeeze())
                 plt.draw()
                 plt.pause(0.5)

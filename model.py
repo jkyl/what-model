@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
+from jax import lax
+
 
 def concat_ragged(*args: jax.Array):
     lengths = [a.shape[1] for a in args]
@@ -95,3 +97,90 @@ class DilatedDenseNet(nn.Module):
         x = nn.relu(x)
         x = nn.Conv(features=ch_in, kernel_size=(1,), use_bias=False)(x)
         return x
+
+
+def sinusoidal_embeddings(length: int, dim: int, decay_term: float = 1e4) -> jax.Array:
+    positions = jnp.arange(1 - length, length).reshape(-1, 1)
+    div_term = jnp.exp(-jnp.arange(0, dim, 2) * (jnp.log(decay_term) / dim))
+    sin_term = jnp.sin(positions * div_term)
+    cos_term = jnp.cos(positions * div_term)
+    pos_enc = jnp.concatenate([sin_term, cos_term], axis=1)
+    return pos_enc
+
+
+def compute_relative_scores(
+    query: jax.Array,
+    embeddings_matrix: jax.Array,
+    use_optimized_impl: bool,
+) -> jax.Array:
+
+    batch_size, num_heads, length, dim = query.shape
+    assert embeddings_matrix.shape == (2 * length - 1, dim)
+
+    if use_optimized_impl:
+        return _compute_relative_scores_with_conv(query, embeddings_matrix)
+
+    return _compute_relative_scores_with_indexing(query, embeddings_matrix)
+
+
+def _compute_relative_scores_with_indexing(query: jax.Array, embeddings_matrix: jax.Array) -> jax.Array:
+    batch_size, num_heads, length, dim = query.shape
+    indices = (jnp.arange(length)[:, None] - jnp.arange(length)) + length - 1
+    embeddings = embeddings_matrix[indices]
+    qe = jnp.einsum("bhqd,qkd->bhqk", query, embeddings)
+    return qe
+
+
+def _compute_relative_scores_with_conv(query: jax.Array, embeddings_matrix: jax.Array) -> jax.Array:
+    raise NotImplementedError
+
+
+class RelativeSelfAttention(nn.Module):
+    num_heads: int
+    optimized: bool = False
+
+    def _split_heads(self, x: jax.Array) -> jax.Array:
+        """Split channels (axis 2) into multiple heads along a new axis (position 1)."""
+        return x.reshape(x.shape[0], x.shape[1], self.num_heads, -1).transpose(0, 2, 1, 3)
+
+    @staticmethod
+    def _combine_heads(x: jax.Array) -> jax.Array:
+        """Combine multi-head outputs into original-shaped array."""
+        return x.transpose(0, 2, 1, 3).reshape(x.shape[0], x.shape[1], -1)
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+
+        # Check that the input shape is valid.
+        _, length, dim = x.shape
+        assert dim % self.num_heads == 0, "dim must be divisible by num_heads."
+        d_head = dim // self.num_heads
+
+        # Project input onto queries, keys, and values.
+        qkv = nn.Conv(3 * dim, kernel_size=(1,))(x)
+
+        # Split the projected inputs into heads.
+        qkv = self._split_heads(qkv)
+        q, k, v = jnp.split(qkv, 3, axis=3)
+
+        # Correlate queries and keys.
+        qk = jnp.einsum("bhqd,bhkd->bhqk", q, k)
+
+        # Generate sinusoidal embeddings.
+        embeddings_matrix = sinusoidal_embeddings(length, d_head)
+
+        # Correlate queries and embeddings.
+        qe = compute_relative_scores(q, embeddings_matrix, use_optimized_impl=self.optimized)
+
+        # Combine scores to form logits.
+        logits = qk + qe
+
+        # Normalize logits.
+        scaled_logits = logits / jnp.sqrt(d_head)
+        weights = jax.nn.softmax(scaled_logits)
+
+        # Reduce across keys.
+        output = jnp.einsum("bhqk,bhkd->bhqd", weights, v)
+
+        # Collapse heads axis back to channels.
+        return self._combine_heads(output)
