@@ -1,8 +1,9 @@
+import concurrent.futures
+
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-import concurrent.futures
 from typing_extensions import Self
 from queue import Queue, Empty, Full
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from omegaconf import DictConfig
 from scipy.datasets import electrocardiogram as ecg
 
+from common import batch_crops
 from diffusion import compose_diffusion_batch
 
 
@@ -20,17 +22,14 @@ class WaveformDataset(nn.Module):
         data = ecg()
         data -= data.mean()
         data /= data.std()
-        data = data.reshape(-1, 1)
         return jnp.array(data, dtype=jnp.float32)
 
     @nn.compact
-    def __call__(self, batch_size, length):
+    def __call__(self, batch_size: int, length: int, p: int = 0):
         rng = self.make_rng("crops")
         data = self.param("data", self._init)
-        starts = jax.random.randint(rng, (batch_size,), 0, data.size - length)
-        indices = jnp.arange(length) + starts.reshape(-1, 1)
-        batch = data[indices]
-        return batch
+        starts = jax.random.randint(rng, (batch_size,), -p, data.size - length + p)
+        return batch_crops(data, starts, length)[..., None]
 
 
 @dataclass
@@ -38,13 +37,14 @@ class WaveformSampler:
     dataset: WaveformDataset
     batch_size: int
     length: int
+    p: int = 0
 
     def __post_init__(self):
-        dummy_rng = jax.random.PRNGKey(0)  # The parameters of this dataset are static.
+        dummy_rng = jax.random.PRNGKey(0)  # The parameters of this module are static.
         self.params = self.dataset.init({"params": dummy_rng, "crops": dummy_rng}, self.batch_size, self.length)
 
     def __getitem__(self, rng: jax.Array):
-        return self.dataset.apply(self.params, self.batch_size, self.length, rngs={"crops": rng})
+        return self.dataset.apply(self.params, self.batch_size, self.length, self.p, rngs={"crops": rng})
 
 
 @dataclass
@@ -96,7 +96,12 @@ class WaveformDataLoader:
         return self.data_queue.get()
 
     @classmethod
-    def from_config(cls, rng, config: DictConfig) -> Self:
+    def from_config(cls, rng, config: DictConfig, **fallbacks) -> Self:
         dataset = WaveformDataset()
-        datagen = WaveformSampler(dataset, config.batch_size, config.length)
+        datagen = WaveformSampler(
+            dataset,
+            config.batch_size,
+            config.length or fallbacks["length"],
+            config.p or fallbacks["p"],
+        )
         return cls(rng, datagen, config.num_threads, config.max_queue_length)

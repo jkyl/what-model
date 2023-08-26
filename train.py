@@ -99,18 +99,27 @@ def interval(step: int, rate: int) -> bool:
     return step and ((step + 1) % rate == 0)
 
 
+def get_val_len(config: DictConfig, net_pad: int) -> Tuple[int, int]:
+    input_len = config.length or net_pad if config.padded else (
+        config.num_steps * net_pad + (config.length or net_pad))
+    output_len = input_len if config.padded else input_len - config.num_steps * net_pad
+    return input_len, output_len
+
+
 @hydra.main(version_base=None, config_path=".", config_name="config")
 def main(config: DictConfig):
     init_rng = jax.random.PRNGKey(config.rngs.init)
     state = TrainState.from_config(init_rng, config)
     print("params:", count_params(state))
     data_rng = jax.random.PRNGKey(config.rngs.data)
-    data = WaveformDataLoader.from_config(data_rng, config.data)
+    data = WaveformDataLoader.from_config(data_rng, config.data, p=state.net.p, length=2*state.net.pad)
     assert data.datagen.length > state.net.pad
     val_rng = jax.random.PRNGKey(config.rngs.val)
+    val_input_len, val_output_len = get_val_len(config.validation, state.net.pad)
+    val_xt = jax.random.normal(val_rng, (1, val_input_len, 1))
 
     import matplotlib.pyplot as plt
-    x = 2 * jax.random.normal(val_rng, (256,))
+    x = 2 * jax.random.normal(val_rng, (val_output_len,))
     fig, ax = plt.subplots()
     line, = ax.plot(x)
     plt.ion()
@@ -125,14 +134,14 @@ def main(config: DictConfig):
                 print(
                     f"steps={step + 1}, avg_loss="
                     f"{jnp.mean(jnp.array(losses[-config.training.log_interval:])):.3f}")
-            if interval(step, config.training.val_interval):
+            if interval(step, config.validation.interval):
                 print("generating")
                 x0_pred = diffusion_sampling(
                     rng=val_rng,
                     model=lambda xt, t: apply_model_inference(state, xt, t),
-                    xt=jax.random.normal(val_rng, (1, state.net.pad * 10 + 256, 1)),
-                    num_steps=10,
-                    eta=0,
+                    xt=val_xt,
+                    num_steps=config.validation.num_steps,
+                    p=state.net.p if config.validation.padded else 0,
                 )
                 line.set_ydata(x0_pred.squeeze())
                 plt.draw()
