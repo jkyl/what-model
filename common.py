@@ -10,13 +10,13 @@ def batch_crops(data: jax.Array, starts: jax.Array, length: int):
     # Crops will use jnp.take with shifted versions of this index array.
     indices = jnp.arange(length)
 
-    # Value is guaranteed to be OOB for this array.
+    # Index is guaranteed to be OOB for this array.
     oob = data.shape[0]
 
     def zero_padded_crop(start):
 
         # Translate the crop indices to (potentially OOB) positions.
-        shifted_indices = start + indices
+        shifted_indices = starts + indices
 
         # Replace negative indices with OOB index.
         shifted_indices = jnp.where(shifted_indices < 0, oob, shifted_indices)

@@ -3,6 +3,7 @@ import concurrent.futures
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+import soundfile as sf
 
 from typing_extensions import Self
 from queue import Queue, Empty, Full
@@ -18,8 +19,9 @@ from diffusion import compose_diffusion_batch
 class WaveformDataset(nn.Module):
 
     @staticmethod
-    def _init(_) -> jax.Array:
-        data = ecg()
+    def _init(_, filename: str) -> jax.Array:
+        data, _ = sf.read(filename)
+        data = data.mean(axis=1)
         data -= data.mean()
         data /= data.std()
         return jnp.array(data, dtype=jnp.float32)
@@ -27,7 +29,7 @@ class WaveformDataset(nn.Module):
     @nn.compact
     def __call__(self, batch_size: int, length: int, p: int = 0):
         rng = self.make_rng("crops")
-        data = self.param("data", self._init)
+        data = self.param("data", self._init, filename)
         starts = jax.random.randint(rng, (batch_size,), -p, data.size - length + p)
         return batch_crops(data, starts, length)[..., None]
 

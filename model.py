@@ -141,7 +141,7 @@ class RelativeSelfAttention(nn.Module):
 
     def _split_heads(self, x: jax.Array) -> jax.Array:
         """Split channels (axis 2) into multiple heads along a new axis (position 1)."""
-        return x.reshape(x.shape[0], x.shape[1], self.num_heads, -1).transpose(0, 2, 1, 3)
+        return jnp.split(x.reshape(x.shape[0], x.shape[1], self.num_heads, -1).transpose(0, 2, 1, 3), 3, axis=3)
 
     @staticmethod
     def _combine_heads(x: jax.Array) -> jax.Array:
@@ -156,12 +156,8 @@ class RelativeSelfAttention(nn.Module):
         assert dim % self.num_heads == 0, "dim must be divisible by num_heads."
         d_head = dim // self.num_heads
 
-        # Project input onto queries, keys, and values.
-        qkv = nn.Conv(3 * dim, kernel_size=(1,))(x)
-
-        # Split the projected inputs into heads.
-        qkv = self._split_heads(qkv)
-        q, k, v = jnp.split(qkv, 3, axis=3)
+        # Project input onto queries, keys, and values and split amongst heads.
+        q, k, v = self._split_heads(nn.Conv(3 * dim, kernel_size=(1,))(x))
 
         # Correlate queries and keys.
         qk = jnp.einsum("bhqd,bhkd->bhqk", q, k)

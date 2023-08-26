@@ -1,3 +1,19 @@
+"""
+This module implements a diffusion-based image sampling technique 
+based on the DDIM method as described in https://arxiv.org/pdf/2202.00512.pdf.
+
+The primary functions are:
+- `alpha`: Defines the diffusion schedule.
+- `alpha_sigma`: Decomposes alpha into complimentary coefficients.
+- `x0_and_e_to_xt_and_vt`: Transforms initial states and noise to their evolved forms.
+- `vt_and_xt_to_x0_and_e`: Reverts evolved states and noises back to their initial forms.
+- `compose_diffusion_batch`: Prepares a batch of initial states, noise, and diffusion schedule.
+- `get_timesteps`: Generates the time steps for diffusion.
+- `ddim_sampling_step`: Implements a single step in the DDIM diffusion process.
+- `diffusion_sampling`: Executes the entire diffusion sampling process across multiple steps.
+
+"""
+
 import jax
 import jax.numpy as jnp
 import tqdm
@@ -6,12 +22,23 @@ from typing import Tuple, Callable, Mapping, Optional, Union
 
 
 def alpha(t: jax.Array) -> jax.Array:
+    """
+    Defines the diffusion schedule as a function of t ∈ [0, 1].
+    """
     return (jnp.cos(jnp.pi * t.reshape(-1, 1, 1)) + 1) / 2.
+
+
+def alpha_sigma(a: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    """
+    Breaks alpha(t) into alpha and sigma, shorthand for
+    their variance-preserving complimentary coefficients.
+    """
+    return a ** 0.5, (1 - a) ** 0.5
 
 
 def x0_and_e_to_xt_and_vt(x0: jax.Array, e: jax.Array, at: jax.Array) -> Tuple[jax.Array, jax.Array]:
     """
-    https://arxiv.org/pdf/2202.00512.pdf#page=14
+    Converts initial values and noise to their equivalents at a specific time t.
     """
     a, s = alpha_sigma(at)
     xt = a * x0 + s * e
@@ -21,7 +48,7 @@ def x0_and_e_to_xt_and_vt(x0: jax.Array, e: jax.Array, at: jax.Array) -> Tuple[j
 
 def vt_and_xt_to_x0_and_e(vt: jax.Array, xt: jax.Array, at: jax.Array) -> Tuple[jax.Array, jax.Array]:
     """
-    https://arxiv.org/pdf/2202.00512.pdf#page=14
+    Reverts evolved states and noises back to their initial forms.
     """
     a, s = alpha_sigma(at)
     x0 = a * xt - s * vt
@@ -30,11 +57,14 @@ def vt_and_xt_to_x0_and_e(vt: jax.Array, xt: jax.Array, at: jax.Array) -> Tuple[
 
 
 def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array, ...]:
+    """
+    Generates initial states, noise, and diffusion schedule for a batch.
+    """
     rng, x0_key = jax.random.split(rng)
     x0 = datagen[x0_key]  # Maybe zero-padded.
     rng, e_key = jax.random.split(rng)
     e = jax.random.normal(e_key, x0.shape)
-    e = jnp.where(x0 == 0, 0, e)  # OOB regions are zero.
+    e = jnp.where(x0 == 0, 0, e)  # OOB regions are zero (TODO: bad! fix!).
     rng, t_key = jax.random.split(rng)
     t = jax.random.uniform(t_key, (x0.shape[0],))
     at = alpha(t).reshape(-1, 1, 1)
@@ -43,6 +73,9 @@ def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array
 
 
 def get_timesteps(num_steps: int, batch_size: int) -> jax.Array:
+    """
+    Creates a tensor of time steps for the diffusion process.
+    """
     num_steps += 1
     timesteps = jnp.linspace(0, 1, num_steps)
     next_timesteps = jnp.roll(timesteps, 1)
@@ -50,14 +83,6 @@ def get_timesteps(num_steps: int, batch_size: int) -> jax.Array:
     timesteps = timesteps[::-1]  # Diffusion goes from t=T to t=0.
     batches = jnp.repeat(timesteps.reshape(num_steps, 2, 1), batch_size, axis=2)
     return batches[:-1]  # Don't need the last step for generation.
-
-
-def alpha_sigma(a: jax.Array) -> Tuple[jax.Array, jax.Array]:
-    """
-    Breaks alpha(t) into alpha and sigma, shorthand for
-    their variance-preserving complimentary coefficients.
-    """
-    return a ** 0.5, (1 - a) ** 0.5
 
 
 def ddim_sampling_step(
@@ -69,6 +94,9 @@ def ddim_sampling_step(
     eta: float = 0.,
     xt: jax.Array
 ) -> Tuple[jax.Array, jax.Array]:
+    """
+    Executes a single DDIM sampling step.
+    """
     at = alpha(t)
     at_next = alpha(t_next)
     vt = model(xt, t)
@@ -93,7 +121,9 @@ def diffusion_sampling(
     progbar: Optional[bool] = True,
     p: int = 0,
 ) -> jax.Array:
-
+    """
+    Performs diffusion sampling across multiple steps.
+    """
     timesteps = get_timesteps(num_steps, xt.shape[0])
     for step in tqdm.tqdm(reversed(range(num_steps)), disable=(not progbar)):
         xt = jax.lax.pad(xt, 0., [(0, 0, 0), (p, p, 0), (0, 0, 0)]) if p else xt
