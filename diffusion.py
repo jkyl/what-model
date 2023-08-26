@@ -30,6 +30,9 @@ def vt_and_xt_to_x0_and_e(vt: jax.Array, xt: jax.Array, at: jax.Array) -> Tuple[
 
 
 def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array, ...]:
+    """
+    Generates initial states, noise, and diffusion schedule for a batch.
+    """
     rng, x0_key = jax.random.split(rng)
     x0 = datagen[x0_key]  # Maybe zero-padded.
     rng, e_key = jax.random.split(rng)
@@ -43,6 +46,9 @@ def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array
 
 
 def get_timesteps(num_steps: int, batch_size: int) -> jax.Array:
+    """
+    Creates a tensor of time steps for the diffusion process.
+    """
     num_steps += 1
     timesteps = jnp.linspace(0, 1, num_steps)
     next_timesteps = jnp.roll(timesteps, 1)
@@ -69,6 +75,9 @@ def ddim_sampling_step(
     eta: float = 0.,
     xt: jax.Array
 ) -> Tuple[jax.Array, jax.Array]:
+    """
+    Executes a single DDIM sampling step.
+    """
     at = alpha(t)
     at_next = alpha(t_next)
     vt = model(xt, t)
@@ -93,7 +102,9 @@ def diffusion_sampling(
     progbar: Optional[bool] = True,
     p: int = 0,
 ) -> jax.Array:
-
+    """
+    Performs diffusion sampling across multiple steps.
+    """
     timesteps = get_timesteps(num_steps, xt.shape[0])
     for step in tqdm.tqdm(reversed(range(num_steps)), disable=(not progbar)):
         xt = jax.lax.pad(xt, 0., [(0, 0, 0), (p, p, 0), (0, 0, 0)]) if p else xt
