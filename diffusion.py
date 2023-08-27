@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import tqdm
 
-from typing import Tuple, Callable, Mapping, Optional, Union
+from typing import Tuple, Callable, Mapping, Optional
 
 
 def alpha(t: jax.Array) -> jax.Array:
@@ -67,7 +67,7 @@ def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array
     e = jnp.where(x0 == 0, 0, e)  # OOB regions are zero (TODO: bad! fix!).
     rng, t_key = jax.random.split(rng)
     t = jax.random.uniform(t_key, (x0.shape[0],))
-    at = alpha(t).reshape(-1, 1, 1)
+    at = alpha(t)
     xt, vt = x0_and_e_to_xt_and_vt(x0, e, at)
     return rng, xt, t, vt
 

@@ -9,6 +9,7 @@ from typing_extensions import Self
 from queue import Queue, Empty, Full
 from dataclasses import dataclass
 
+from typing import Optional
 from omegaconf import DictConfig
 from scipy.datasets import electrocardiogram as ecg
 
@@ -17,11 +18,15 @@ from diffusion import compose_diffusion_batch
 
 
 class WaveformDataset(nn.Module):
+    filename: Optional[str]
 
     @staticmethod
     def _init(_, filename: str) -> jax.Array:
-        data, _ = sf.read(filename)
-        data = data.mean(axis=1)
+        if filename is not None:
+            data, _ = sf.read(filename)
+            data = data.mean(axis=1)
+        else:
+            data = ecg()
         data -= data.mean()
         data /= data.std()
         return jnp.array(data, dtype=jnp.float32)
@@ -29,7 +34,7 @@ class WaveformDataset(nn.Module):
     @nn.compact
     def __call__(self, batch_size: int, length: int, p: int = 0):
         rng = self.make_rng("crops")
-        data = self.param("data", self._init, filename)
+        data = self.param("data", self._init, self.filename)
         starts = jax.random.randint(rng, (batch_size,), -p, data.size - length + p)
         return batch_crops(data, starts, length)[..., None]
 
@@ -64,6 +69,7 @@ class WaveformDataLoader:
         self.data_queue = Queue(self.max_queue_length)
         self.control_queue = Queue(maxsize=self.num_threads)
 
+    @jax.default_device(jax.devices("cpu")[0])
     def _worker(self, rng_key):
         batch = None
         while True:
@@ -99,7 +105,7 @@ class WaveformDataLoader:
 
     @classmethod
     def from_config(cls, rng, config: DictConfig, **fallbacks) -> Self:
-        dataset = WaveformDataset()
+        dataset = WaveformDataset(filename=config.filename)
         datagen = WaveformSampler(
             dataset,
             config.batch_size,

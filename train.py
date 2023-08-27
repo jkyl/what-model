@@ -118,13 +118,6 @@ def main(config: DictConfig):
     val_input_len, val_output_len = get_val_len(config.validation, state.net.pad)
     val_xt = jax.random.normal(val_rng, (1, val_input_len, 1))
 
-    import matplotlib.pyplot as plt
-    x = 2 * jax.random.normal(val_rng, (val_output_len,))
-    fig, ax = plt.subplots()
-    line, = ax.plot(x)
-    plt.ion()
-    plt.show()
-
     with data:
         losses = []
         for step in range(config.training.num_iters):
@@ -143,9 +136,6 @@ def main(config: DictConfig):
                     num_steps=config.validation.num_steps,
                     p=state.net.p if config.validation.padded else 0,
                 )
-                line.set_ydata(x0_pred.squeeze())
-                plt.draw()
-                plt.pause(0.5)
 
 
 if __name__ == "__main__":

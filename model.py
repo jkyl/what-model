@@ -2,8 +2,6 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from jax import lax
-
 
 def concat_ragged(*args: jax.Array):
     lengths = [a.shape[1] for a in args]
