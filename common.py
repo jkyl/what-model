@@ -2,27 +2,25 @@ import jax
 import jax.numpy as jnp
 
 from functools import partial
+from typing import Tuple
 
 
 @partial(jax.jit, static_argnums=2)
-def batch_crops(data: jax.Array, starts: jax.Array, length: int):
+def batch_crops(data: jax.Array, starts: jax.Array, length: int) -> Tuple[jax.Array, jax.Array]:
 
-    # Crops will use jnp.take with shifted versions of this index array.
-    indices = jnp.arange(length)
+    # Translate the crop indices to (potentially OOB) positions.
+    indices = starts[:, None] + jnp.arange(length)
 
-    # Index is guaranteed to be OOB for this array.
+    # This value is guaranteed to be OOB for this array.
     oob = data.shape[0]
+    
+    # Create a mask of the indices that are OOB.
+    oob_mask = jnp.logical_or(indices < 0, indices >= oob)
 
-    def zero_padded_crop(start):
+    # Replace all OOB indices with single OOB value.
+    indices = jnp.where(oob_mask, oob, indices)
 
-        # Translate the crop indices to (potentially OOB) positions.
-        shifted_indices = starts + indices
-
-        # Replace negative indices with OOB index.
-        shifted_indices = jnp.where(shifted_indices < 0, oob, shifted_indices)
-
-        # Use jnp.take instead of jax.lax.dynamic_slice to handle OOB zero-padding.
-        return jnp.take(data, shifted_indices, mode="fill", fill_value=0)
-
-    # vmap the function over all starts.
-    return jax.vmap(zero_padded_crop)(starts)
+    # Use jnp.take instead of jax.lax.dynamic_slice to handle zero-padding.
+    batch = jnp.take(data, indices, mode="fill", fill_value=0)
+    
+    return batch, oob_mask

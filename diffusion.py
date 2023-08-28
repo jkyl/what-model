@@ -1,19 +1,3 @@
-"""
-This module implements a diffusion-based image sampling technique 
-based on the DDIM method as described in https://arxiv.org/pdf/2202.00512.pdf.
-
-The primary functions are:
-- `alpha`: Defines the diffusion schedule.
-- `alpha_sigma`: Decomposes alpha into complimentary coefficients.
-- `x0_and_e_to_xt_and_vt`: Transforms initial states and noise to their evolved forms.
-- `vt_and_xt_to_x0_and_e`: Reverts evolved states and noises back to their initial forms.
-- `compose_diffusion_batch`: Prepares a batch of initial states, noise, and diffusion schedule.
-- `get_timesteps`: Generates the time steps for diffusion.
-- `ddim_sampling_step`: Implements a single step in the DDIM diffusion process.
-- `diffusion_sampling`: Executes the entire diffusion sampling process across multiple steps.
-
-"""
-
 import jax
 import jax.numpy as jnp
 import tqdm
@@ -61,10 +45,10 @@ def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array
     Generates initial states, noise, and diffusion schedule for a batch.
     """
     rng, x0_key = jax.random.split(rng)
-    x0 = datagen[x0_key]  # Maybe zero-padded.
+    x0, mask = datagen[x0_key]  # Maybe zero-padded.
     rng, e_key = jax.random.split(rng)
     e = jax.random.normal(e_key, x0.shape)
-    e = jnp.where(x0 == 0, 0, e)  # OOB regions are zero (TODO: bad! fix!).
+    e = jnp.where(mask, 0, e)  # OOB regions are zero.
     rng, t_key = jax.random.split(rng)
     t = jax.random.uniform(t_key, (x0.shape[0],))
     at = alpha(t)

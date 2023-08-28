@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import orbax.checkpoint
 import optax
 import hydra
 
@@ -7,7 +8,7 @@ from typing import Tuple, Any
 from typing_extensions import Self
 
 from omegaconf import DictConfig
-from flax.training import train_state
+from flax.training import train_state, orbax_utils
 
 from model import DilatedDenseNet
 from data import WaveformDataLoader
@@ -104,6 +105,13 @@ def get_val_len(config: DictConfig, net_pad: int) -> Tuple[int, int]:
         config.num_steps * net_pad + (config.length or net_pad))
     output_len = input_len if config.padded else input_len - config.num_steps * net_pad
     return input_len, output_len
+
+
+def save_checkpoint(filepath: str, state: TrainState, config: DictConfig, data: WaveformDataLoader) -> None:
+    ckpt = {"model": state, "config": config, "data": data}
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(ckpt)
+    orbax_checkpointer.save(filepath, ckpt, save_args=save_args)
 
 
 @hydra.main(version_base=None, config_path=".", config_name="config")

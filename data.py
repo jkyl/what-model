@@ -27,7 +27,9 @@ class WaveformDataset(nn.Module):
             data = data.mean(axis=1)
         else:
             data = ecg()
-        data -= data.mean()
+            
+        # Skip mean-subtraction because of digital black.
+        # data -= data.mean()
         data /= data.std()
         return jnp.array(data, dtype=jnp.float32)
 
@@ -36,7 +38,8 @@ class WaveformDataset(nn.Module):
         rng = self.make_rng("crops")
         data = self.param("data", self._init, self.filename)
         starts = jax.random.randint(rng, (batch_size,), -p, data.size - length + p)
-        return batch_crops(data, starts, length)[..., None]
+        batch, mask = batch_crops(data, starts, length)
+        return batch[..., None], mask[..., None]
 
 
 @dataclass
@@ -45,11 +48,13 @@ class WaveformSampler:
     batch_size: int
     length: int
     p: int = 0
-
+    
+    @jax.default_device(jax.devices("cpu")[0])
     def __post_init__(self):
         dummy_rng = jax.random.PRNGKey(0)  # The parameters of this module are static.
         self.params = self.dataset.init({"params": dummy_rng, "crops": dummy_rng}, self.batch_size, self.length)
 
+    @jax.default_device(jax.devices("cpu")[0])
     def __getitem__(self, rng: jax.Array):
         return self.dataset.apply(self.params, self.batch_size, self.length, self.p, rngs={"crops": rng})
 
@@ -68,26 +73,31 @@ class WaveformDataLoader:
     def __post_init__(self):
         self.data_queue = Queue(self.max_queue_length)
         self.control_queue = Queue(maxsize=self.num_threads)
+        self.worker_exceptions = []
 
     @jax.default_device(jax.devices("cpu")[0])
     def _worker(self, rng_key):
         batch = None
-        while True:
-            try:
-                command = self.control_queue.get_nowait()
-                if command == self._shutdown:
-                    break
-            except Empty:
-                pass
+        try:
+            while True:
+                try:
+                    command = self.control_queue.get_nowait()
+                    if command == self._shutdown:
+                        break
+                except Empty:
+                    pass
 
-            if batch is None:
-                rng_key, *batch = compose_diffusion_batch(rng_key, self.datagen)
+                if batch is None:
+                    rng_key, *batch = compose_diffusion_batch(rng_key, self.datagen)
 
-            try:
-                self.data_queue.put(batch, timeout=0.5)
-                batch = None
-            except Full:
-                pass
+                try:
+                    self.data_queue.put(batch, timeout=0.5)
+                    batch = None
+                except Full:
+                    pass
+        except Exception as e:
+            print("exception in worker", e)
+            self.worker_exceptions.append(e)
 
     def __enter__(self):
         rng_keys = jax.random.split(self.rng, self.num_threads)
@@ -101,10 +111,15 @@ class WaveformDataLoader:
         self.executor.shutdown()
 
     def get(self):
-        return self.data_queue.get()
+        if self.worker_exceptions:
+            raise RuntimeError("Worker thread exceptions detected.") from self.worker_exceptions[0]
+        batch = self.data_queue.get()
+        gpu_if_avail = jax.devices()[0]
+        batch = [jax.device_put(elem, gpu_if_avail) for elem in batch]
+        return batch
 
     @classmethod
-    def from_config(cls, rng, config: DictConfig, **fallbacks) -> Self:
+    def from_config(cls, rng, config: DictConfig, fallbacks: dict) -> Self:
         dataset = WaveformDataset(filename=config.filename)
         datagen = WaveformSampler(
             dataset,
