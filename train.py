@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import orbax.checkpoint
 import optax
 import hydra
 
@@ -7,7 +8,7 @@ from typing import Tuple, Any
 from typing_extensions import Self
 
 from omegaconf import DictConfig
-from flax.training import train_state
+from flax.training import train_state, orbax_utils
 
 from model import DilatedDenseNet
 from data import WaveformDataLoader
@@ -106,6 +107,13 @@ def get_val_len(config: DictConfig, net_pad: int) -> Tuple[int, int]:
     return input_len, output_len
 
 
+def save_checkpoint(filepath: str, state: TrainState, config: DictConfig, data: WaveformDataLoader) -> None:
+    ckpt = {"model": state, "config": config, "data": data}
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(ckpt)
+    orbax_checkpointer.save(filepath, ckpt, save_args=save_args)
+
+
 @hydra.main(version_base=None, config_path=".", config_name="config")
 def main(config: DictConfig):
     init_rng = jax.random.PRNGKey(config.rngs.init)
@@ -117,13 +125,6 @@ def main(config: DictConfig):
     val_rng = jax.random.PRNGKey(config.rngs.val)
     val_input_len, val_output_len = get_val_len(config.validation, state.net.pad)
     val_xt = jax.random.normal(val_rng, (1, val_input_len, 1))
-
-    import matplotlib.pyplot as plt
-    x = 2 * jax.random.normal(val_rng, (val_output_len,))
-    fig, ax = plt.subplots()
-    line, = ax.plot(x)
-    plt.ion()
-    plt.show()
 
     with data:
         losses = []
@@ -143,9 +144,6 @@ def main(config: DictConfig):
                     num_steps=config.validation.num_steps,
                     p=state.net.p if config.validation.padded else 0,
                 )
-                line.set_ydata(x0_pred.squeeze())
-                plt.draw()
-                plt.pause(0.5)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from jax import lax
+from functools import partial
+from typing import Optional
 
 
 def concat_ragged(*args: jax.Array):
@@ -19,11 +20,23 @@ def concat_ragged(*args: jax.Array):
 class ConditionalBatchNorm(nn.Module):
 
     @nn.compact
-    def __call__(self, x: jax.Array, z: jax.Array, train: bool) -> jax.Array:
-        x = nn.BatchNorm(use_scale=False, use_bias=False, use_running_average=not train)(x)
-        scale = nn.Dense(x.shape[-1])(z).reshape(-1, 1, x.shape[-1])
-        bias = nn.Dense(x.shape[-1])(z).reshape(-1, 1, x.shape[-1])
-        x = x * scale + bias
+    def __call__(
+        self, 
+        x: jax.Array, 
+        scale: Optional[jax.Array] = None, 
+        bias: Optional[jax.Array] = None, 
+        *,
+        train: bool,
+    ) -> jax.Array:
+        x = nn.BatchNorm(
+            use_scale=scale is None, 
+            use_bias=bias is None, 
+            use_running_average=not train,
+        )(x)
+        if scale is not None:
+            x = x * scale[:, None]
+        if bias is not None:
+            x = x + bias[:, None]
         return x
 
 
@@ -40,11 +53,19 @@ class DilatedBlock(nn.Module):
         return x
 
     @nn.compact
-    def __call__(self, x: jax.Array, z: jax.Array, train: bool) -> jax.Array:
-        for i in range(self.depth + 1):
+    def __call__(
+        self, 
+        x: jax.Array, 
+        z: jax.Array,
+        *,
+        train: bool,
+    ) -> jax.Array:
+        
+        zs = jnp.split(z, 2 * (self.depth + 1), axis=1)
+        for i, (scale, bias) in enumerate(zip(zs[::2], zs[1::2])):
             dilation = 2 ** (i % self.depth)
             x0 = self.shortcut(x, dilation)
-            x = ConditionalBatchNorm()(x, z, train)
+            x = ConditionalBatchNorm()(x, scale, bias, train=train)
             x = nn.relu(x)
             x = nn.Conv(
                 features=self.ch,
@@ -55,6 +76,18 @@ class DilatedBlock(nn.Module):
             )(x)
             x += x0
         return x
+    
+    
+class MLP(nn.Module):
+    hidden_dim: int
+    output_dim: int
+    
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(self.hidden_dim)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.output_dim)(x)
+        return x
 
 
 class DilatedDenseNet(nn.Module):
@@ -62,7 +95,7 @@ class DilatedDenseNet(nn.Module):
     depth: int
     kernel_size: int
     num_blocks: int
-    embedding_dim: int
+    hidden_dim: int
 
     def __post_init__(self) -> None:
         self.pad = self.num_blocks * (self.kernel_size - 1) * 2 ** self.depth
@@ -70,32 +103,82 @@ class DilatedDenseNet(nn.Module):
         dummy_xt = jnp.ones((1, self.pad + 1, 1))
         dummy_t = jnp.ones((1,), dtype=jnp.int32)
         self.dummy_args = (dummy_xt, dummy_t)
+        self.z_dim = self.ch * 2 * (self.depth + 1) * self.num_blocks
         super().__post_init__()
-
-    def _mlp(self, x):
-        x = x.reshape(-1, 1)
-        x = nn.Dense(self.embedding_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.embedding_dim)(x)
-        x = nn.relu(x)
-        return x
 
     @nn.compact
     def __call__(
         self,
         x: jax.Array,
         t: jax.Array,
+        *,
         train: bool,
     ) -> jax.Array:
         ch_in = x.shape[-1]
-        z = self._mlp(t)
         cat = [x]
-        for _ in range(self.num_blocks):
-            cat.append(DilatedBlock(self.ch, self.depth, self.kernel_size)(cat[-1], z, train))
+        zs = MLP(self.hidden_dim, self.z_dim)(t.reshape(-1, 1))
+        for z in jnp.split(zs, self.num_blocks, axis=1):
+            cat.append(DilatedBlock(self.ch, self.depth, self.kernel_size)(cat[-1], z, train=train))
         x = concat_ragged(*cat)
-        x = ConditionalBatchNorm()(x, z, train)
+        x = ConditionalBatchNorm()(x, train=train)  # No conditional scale and bias; use parameters.
         x = nn.relu(x)
-        x = nn.Conv(features=ch_in, kernel_size=(1,), use_bias=False)(x)
+        x = nn.Conv(features=ch_in, kernel_size=(1,))(x)
+        return x
+
+
+@partial(jax.jit, static_argnums=1)
+def space_to_depth(x: jax.Array, factor: int = 2):
+    n, l, c = x.shape
+    return x.reshape(n, l // 2, 2 * c)
+
+
+@partial(jax.jit, static_argnums=1)
+def depth_to_space(x: jax.Array, factor: int = 2):
+    n, l, c = x.shape
+    return x.reshape(n, 2 * l, c // 2)
+    
+    
+class UNet(nn.Module):
+    ch: int
+    depth: int
+    hidden_dim: int
+    num_heads: int
+    
+    def __post_init__(self) -> None:
+        self.pad = self.p = 0
+        dummy_xt = jnp.ones((1, 2 ** (self.depth + 2), 1))
+        dummy_t = jnp.ones((1,), dtype=jnp.int32)
+        self.dummy_args = (dummy_xt, dummy_t)
+        self.z_dim = 4 * self.ch * self.depth
+        super().__post_init__()
+    
+    @nn.compact
+    def __call__(self, x: jax.Array, t: jax.Array, *, train: bool) -> jax.Array:
+        ch_in = x.shape[-1]
+        x = nn.Conv(self.ch, kernel_size=(1,), use_bias=False)(x)
+        z = MLP(self.hidden_dim, self.z_dim)(t.reshape(-1, 1))
+        skip = []
+        pointer = 0
+        for i in range(self.depth):
+            dim = x.shape[-1]
+            scale, bias = jnp.split(z[:, pointer : (pointer := pointer + 2 * dim)], 2, axis=1)
+            x = ConditionalBatchNorm()(x, scale, bias, train=train)
+            x = nn.relu(x)
+            x = nn.Conv(dim, kernel_size=(1,), use_bias=False)(x)
+            skip.append(x[..., :dim//2])
+            x = space_to_depth(x[..., dim//2:], 2)
+        x = RelativeSelfAttention(self.num_heads)(x)
+        for i in reversed(range(self.depth)):
+            x = depth_to_space(x)
+            x = jnp.concatenate([skip.pop(-1), x], axis=2)
+            dim = x.shape[-1]
+            scale, bias = jnp.split(z[:, pointer : (pointer := pointer + 2 * dim)], 2, axis=1)
+            x = ConditionalBatchNorm()(x, scale, bias, train=train)
+            x = nn.relu(x)
+            x = nn.Conv(dim, kernel_size=(1,), use_bias=False)(x)
+        x = ConditionalBatchNorm()(x, train=train)
+        x = nn.relu(x)
+        x = nn.Conv(ch_in, kernel_size=(1,))(x)
         return x
 
 
@@ -141,7 +224,7 @@ class RelativeSelfAttention(nn.Module):
 
     def _split_heads(self, x: jax.Array) -> jax.Array:
         """Split channels (axis 2) into multiple heads along a new axis (position 1)."""
-        return x.reshape(x.shape[0], x.shape[1], self.num_heads, -1).transpose(0, 2, 1, 3)
+        return jnp.split(x.reshape(x.shape[0], x.shape[1], self.num_heads, -1).transpose(0, 2, 1, 3), 3, axis=3)
 
     @staticmethod
     def _combine_heads(x: jax.Array) -> jax.Array:
@@ -156,12 +239,8 @@ class RelativeSelfAttention(nn.Module):
         assert dim % self.num_heads == 0, "dim must be divisible by num_heads."
         d_head = dim // self.num_heads
 
-        # Project input onto queries, keys, and values.
-        qkv = nn.Conv(3 * dim, kernel_size=(1,))(x)
-
-        # Split the projected inputs into heads.
-        qkv = self._split_heads(qkv)
-        q, k, v = jnp.split(qkv, 3, axis=3)
+        # Project input onto queries, keys, and values and split amongst heads.
+        q, k, v = self._split_heads(nn.Conv(3 * dim, kernel_size=(1,))(x))
 
         # Correlate queries and keys.
         qk = jnp.einsum("bhqd,bhkd->bhqk", q, k)

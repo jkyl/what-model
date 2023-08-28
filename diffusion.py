@@ -2,16 +2,27 @@ import jax
 import jax.numpy as jnp
 import tqdm
 
-from typing import Tuple, Callable, Mapping, Optional, Union
+from typing import Tuple, Callable, Mapping, Optional
 
 
 def alpha(t: jax.Array) -> jax.Array:
+    """
+    Defines the diffusion schedule as a function of t ∈ [0, 1].
+    """
     return (jnp.cos(jnp.pi * t.reshape(-1, 1, 1)) + 1) / 2.
+
+
+def alpha_sigma(a: jax.Array) -> Tuple[jax.Array, jax.Array]:
+    """
+    Breaks alpha(t) into alpha and sigma, shorthand for
+    their variance-preserving complimentary coefficients.
+    """
+    return a ** 0.5, (1 - a) ** 0.5
 
 
 def x0_and_e_to_xt_and_vt(x0: jax.Array, e: jax.Array, at: jax.Array) -> Tuple[jax.Array, jax.Array]:
     """
-    https://arxiv.org/pdf/2202.00512.pdf#page=14
+    Converts initial values and noise to their equivalents at a specific time t.
     """
     a, s = alpha_sigma(at)
     xt = a * x0 + s * e
@@ -21,7 +32,7 @@ def x0_and_e_to_xt_and_vt(x0: jax.Array, e: jax.Array, at: jax.Array) -> Tuple[j
 
 def vt_and_xt_to_x0_and_e(vt: jax.Array, xt: jax.Array, at: jax.Array) -> Tuple[jax.Array, jax.Array]:
     """
-    https://arxiv.org/pdf/2202.00512.pdf#page=14
+    Reverts evolved states and noises back to their initial forms.
     """
     a, s = alpha_sigma(at)
     x0 = a * xt - s * vt
@@ -34,13 +45,13 @@ def compose_diffusion_batch(rng: jax.Array, datagen: Mapping) -> Tuple[jax.Array
     Generates initial states, noise, and diffusion schedule for a batch.
     """
     rng, x0_key = jax.random.split(rng)
-    x0 = datagen[x0_key]  # Maybe zero-padded.
+    x0, mask = datagen[x0_key]  # Maybe zero-padded.
     rng, e_key = jax.random.split(rng)
     e = jax.random.normal(e_key, x0.shape)
-    e = jnp.where(x0 == 0, 0, e)  # OOB regions are zero.
+    e = jnp.where(mask, 0, e)  # OOB regions are zero.
     rng, t_key = jax.random.split(rng)
     t = jax.random.uniform(t_key, (x0.shape[0],))
-    at = alpha(t).reshape(-1, 1, 1)
+    at = alpha(t)
     xt, vt = x0_and_e_to_xt_and_vt(x0, e, at)
     return rng, xt, t, vt
 
@@ -56,14 +67,6 @@ def get_timesteps(num_steps: int, batch_size: int) -> jax.Array:
     timesteps = timesteps[::-1]  # Diffusion goes from t=T to t=0.
     batches = jnp.repeat(timesteps.reshape(num_steps, 2, 1), batch_size, axis=2)
     return batches[:-1]  # Don't need the last step for generation.
-
-
-def alpha_sigma(a: jax.Array) -> Tuple[jax.Array, jax.Array]:
-    """
-    Breaks alpha(t) into alpha and sigma, shorthand for
-    their variance-preserving complimentary coefficients.
-    """
-    return a ** 0.5, (1 - a) ** 0.5
 
 
 def ddim_sampling_step(
