@@ -2,3 +2,4 @@ venv/
 outputs/
 .idea/
 __pycache__/
+.ipynb_checkpoints/
