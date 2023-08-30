@@ -18,6 +18,7 @@ def concat_ragged(*args: jax.Array):
 
 
 class ConditionalBatchNorm(nn.Module):
+    momentum: float
 
     @nn.compact
     def __call__(
@@ -32,6 +33,7 @@ class ConditionalBatchNorm(nn.Module):
             use_scale=scale is None, 
             use_bias=bias is None, 
             use_running_average=not train,
+            momentum=self.momentum,
         )(x)
         if scale is not None:
             x = x * scale[:, None]
@@ -44,6 +46,7 @@ class DilatedBlock(nn.Module):
     ch: int
     depth: int
     kernel_size: int
+    momentum: float
 
     def shortcut(self, x: jax.Array, dilation: int):
         p = (self.kernel_size // 2) * dilation
@@ -65,7 +68,7 @@ class DilatedBlock(nn.Module):
         for i, (scale, bias) in enumerate(zip(zs[::2], zs[1::2])):
             dilation = 2 ** (i % self.depth)
             x0 = self.shortcut(x, dilation)
-            x = ConditionalBatchNorm()(x, scale, bias, train=train)
+            x = ConditionalBatchNorm(momentum=self.momentum)(x, scale, bias, train=train)
             x = nn.relu(x)
             x = nn.Conv(
                 features=self.ch,
@@ -96,11 +99,12 @@ class DilatedDenseNet(nn.Module):
     kernel_size: int
     num_blocks: int
     hidden_dim: int
+    momentum: float
 
     def __post_init__(self) -> None:
         self.pad = self.num_blocks * (self.kernel_size - 1) * 2 ** self.depth
         self.p = self.pad // 2
-        dummy_xt = jnp.ones((1, self.pad + 1, 1))
+        dummy_xt = jnp.ones((1, self.pad + 1, 2))
         dummy_t = jnp.ones((1,), dtype=jnp.int32)
         self.dummy_args = (dummy_xt, dummy_t)
         self.z_dim = self.ch * 2 * (self.depth + 1) * self.num_blocks
@@ -115,12 +119,12 @@ class DilatedDenseNet(nn.Module):
         train: bool,
     ) -> jax.Array:
         ch_in = x.shape[-1]
-        cat = [x]
+        cat = [nn.Conv(self.ch, kernel_size=(1,))(x)]
         zs = MLP(self.hidden_dim, self.z_dim)(t.reshape(-1, 1))
         for z in jnp.split(zs, self.num_blocks, axis=1):
-            cat.append(DilatedBlock(self.ch, self.depth, self.kernel_size)(cat[-1], z, train=train))
+            cat.append(DilatedBlock(self.ch, self.depth, self.kernel_size, self.momentum)(cat[-1], z, train=train))
         x = concat_ragged(*cat)
-        x = ConditionalBatchNorm()(x, train=train)  # No conditional scale and bias; use parameters.
+        x = ConditionalBatchNorm(momentum=self.momentum)(x, train=train)  # No conditional scale and bias; use parameters.
         x = nn.relu(x)
         x = nn.Conv(features=ch_in, kernel_size=(1,))(x)
         return x

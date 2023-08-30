@@ -2,12 +2,13 @@ import jax
 import jax.numpy as jnp
 import orbax.checkpoint
 import optax
-import hydra
+import yaml
+import hruid
 
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 from typing_extensions import Self
 
-from omegaconf import DictConfig
+from ml_collections.config_dict import ConfigDict
 from flax.training import train_state, orbax_utils
 
 from model import DilatedDenseNet
@@ -19,7 +20,7 @@ class TrainState(train_state.TrainState):
     batch_stats: Any
 
     @classmethod
-    def from_config(cls, rng: jax.Array, config: DictConfig) -> Self:
+    def from_config(cls, rng: jax.Array, config: ConfigDict) -> Self:
         net = DilatedDenseNet(**config.model)
         variables = net.init(rng, *net.dummy_args, train=True)
         params = variables["params"]
@@ -100,22 +101,45 @@ def interval(step: int, rate: int) -> bool:
     return step and ((step + 1) % rate == 0)
 
 
-def get_val_len(config: DictConfig, net_pad: int) -> Tuple[int, int]:
+def get_val_len(config: ConfigDict, net_pad: int) -> Tuple[int, int]:
     input_len = config.length or net_pad if config.padded else (
         config.num_steps * net_pad + (config.length or net_pad))
     output_len = input_len if config.padded else input_len - config.num_steps * net_pad
     return input_len, output_len
 
 
-def save_checkpoint(filepath: str, state: TrainState, config: DictConfig, data: WaveformDataLoader) -> None:
-    ckpt = {"model": state, "config": config, "data": data}
+def save_checkpoint(filepath: str, config: ConfigDict, state: TrainState) -> None:
+    ckpt = {"config": config.to_dict(), "state": state}
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     save_args = orbax_utils.save_args_from_target(ckpt)
-    orbax_checkpointer.save(filepath, ckpt, save_args=save_args)
+    orbax_checkpointer.save(filepath, ckpt, save_args=save_args)        
 
 
-@hydra.main(version_base=None, config_path=".", config_name="config")
-def main(config: DictConfig):
+def restore_checkpoint(filepath: str, override_config: Optional[ConfigDict] = None):
+    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    restored = checkpointer.restore(filepath)
+    config, state = [restored[k] for k in ("config", "state")]
+    if config is not None:
+        config = ConfigDict(config)
+    elif override_config is not None:
+        config = override_config
+    else:
+        raise ValueError("no config found")
+    net = DilatedDenseNet(**config.model)
+    tx = get_optimizer(**config.optimizer)
+    state = TrainState(
+        apply_fn=net.apply,
+        tx=tx,
+        **state,
+    )
+    return config, state
+
+
+def config_from_yaml_str(string):
+    return ConfigDict(yaml.safe_load(string))
+
+
+def main(config: ConfigDict):
     init_rng = jax.random.PRNGKey(config.rngs.init)
     state = TrainState.from_config(init_rng, config)
     print("params:", count_params(state))

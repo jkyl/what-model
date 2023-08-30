@@ -5,7 +5,7 @@ from functools import partial
 from typing import Tuple
 
 
-@partial(jax.jit, static_argnums=2)
+#@partial(jax.jit, static_argnums=2)
 def batch_crops(data: jax.Array, starts: jax.Array, length: int) -> Tuple[jax.Array, jax.Array]:
 
     # Translate the crop indices to (potentially OOB) positions.
@@ -20,7 +20,11 @@ def batch_crops(data: jax.Array, starts: jax.Array, length: int) -> Tuple[jax.Ar
     # Replace all OOB indices with single OOB value.
     indices = jnp.where(oob_mask, oob, indices)
 
+    print(oob, indices)
+
     # Use jnp.take instead of jax.lax.dynamic_slice to handle zero-padding.
     batch = jnp.take(data, indices, mode="fill", fill_value=0)
+
+    print(batch[0])
     
     return batch, oob_mask
