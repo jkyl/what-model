@@ -9,7 +9,7 @@ from functools import partial
 from typing_extensions import Self
 from queue import Queue, Empty, Full
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from ml_collections.config_dict import ConfigDict
 from scipy.datasets import electrocardiogram as ecg
@@ -19,12 +19,12 @@ from diffusion import compose_diffusion_batch
 
 def stereo_to_mid_side(x: jax.Array) -> jax.Array:
     assert x.ndim == 2 and x.shape[1] == 2, x.shape
-    # Orthonormal matrix that defines a reflection about y=x.
+    # Reflection about y=x.
     M = (0.5 ** 0.5) * jnp.array([[1., 1.], [1., -1.]])
     return x @ M
 
 
-# Is its own inverse <==> unitary.
+# It's its own inverse (orthonormal).
 mid_side_to_stereo = stereo_to_mid_side
 
 
@@ -41,17 +41,13 @@ def batch_crops(data: jax.Array, starts: jax.Array, batch_size: int, length: int
 class WaveformDataset(nn.Module):
     filename: Optional[str] = None
     mono: bool = False
-    mid_side: bool = False
     p: int = 0
 
     def _init(self, _) -> jax.Array:
         if self.filename is not None:
             data, _ = sf.read(self.filename)
-            if data.ndim == 2:
-                if self.mono or self.mid_side:
-                    data = stereo_to_mid_side(data)
-                    if self.mono:
-                        data = data[:, :1]
+            if data.ndim == 2 and self.mono:
+                data = stereo_to_mid_side(data)[:, :1]
             if data.ndim == 1:
                 data = data[:, None]
         else:
@@ -63,12 +59,11 @@ class WaveformDataset(nn.Module):
         return data
 
     @nn.compact
-    def __call__(self, batch_size: int, length: int):
+    def __call__(self, batch_size: int, length: int) -> Union[jax.Array, Tuple[jax.Array, ...]]:
         rng = self.make_rng("crops")
         data = self.param("data", self._init)
         starts = jax.random.randint(rng, (batch_size,), 0, data.shape[0] - length)
-        batch, mask = batch_crops(data, starts, batch_size, length, self.p)
-        return batch, mask
+        return batch_crops(data, starts, batch_size, length, self.p)
 
 
 @dataclass
@@ -151,7 +146,6 @@ class WaveformDataLoader:
         dataset = WaveformDataset(
             filename=config.filename, 
             mono=config.mono, 
-            mid_side=config.mid_side,
             p=config.p or fallbacks["p"],
         )
         datagen = WaveformSampler(
@@ -159,4 +153,9 @@ class WaveformDataLoader:
             config.batch_size,
             config.length or fallbacks["length"],
         )
-        return cls(rng, datagen, config.num_threads, config.max_queue_length)
+        return cls(
+            rng, 
+            datagen, 
+            num_threads=config.num_threads, 
+            max_queue_length=config.max_queue_length,
+        )
