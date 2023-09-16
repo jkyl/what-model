@@ -51,7 +51,7 @@ class DilatedBlock(nn.Module):
                 padding="VALID",
                 use_bias=False,
             )(x)
-            x = x0 + x * self.param(f"alpha_{i}", lambda _, shape: jnp.zeros(shape), (1,))
+            x = x0 + x * self.param(f"alpha_{i}", lambda _, I: jnp.zeros(I), (1,))
         return x
 
 
