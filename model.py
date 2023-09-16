@@ -17,26 +17,13 @@ def concat_ragged(*args: jax.Array):
     return catted
 
 
-class ConditionalBatchNorm(nn.Module):
+class Affine(nn.Module):
 
     @nn.compact
-    def __call__(
-        self, 
-        x: jax.Array, 
-        scale: Optional[jax.Array] = None, 
-        bias: Optional[jax.Array] = None, 
-        *,
-        train: bool,
-    ) -> jax.Array:
-        x = nn.BatchNorm(
-            use_scale=scale is None, 
-            use_bias=bias is None, 
-            use_running_average=not train,
-        )(x)
-        if scale is not None:
-            x = x * scale[:, None]
-        if bias is not None:
-            x = x + bias[:, None]
+    def __call__(self, x: jax.Array, z: jax.Array) -> jax.Array:
+        scale = nn.Dense(x.shape[-1], bias_init=nn.initializers.ones_init())(z)
+        bias = nn.Dense(x.shape[-1], bias_init=nn.initializers.zeros_init())(z)
+        x = x * scale[:, None] + bias[:, None]
         return x
 
 
@@ -48,24 +35,14 @@ class DilatedBlock(nn.Module):
     def shortcut(self, x: jax.Array, dilation: int):
         p = (self.kernel_size // 2) * dilation
         x = x[:, p:-p]
-        if x.shape[-1] != self.ch:
-            x = nn.Conv(features=self.ch, kernel_size=(1,), use_bias=False)(x)
         return x
 
     @nn.compact
-    def __call__(
-        self, 
-        x: jax.Array, 
-        z: jax.Array,
-        *,
-        train: bool,
-    ) -> jax.Array:
-        
-        zs = jnp.split(z, 2 * (self.depth + 1), axis=1)
-        for i, (scale, bias) in enumerate(zip(zs[::2], zs[1::2])):
+    def __call__(self, x: jax.Array, z: jax.Array) -> jax.Array:
+        for i in range(self.depth + 1):
             dilation = 2 ** (i % self.depth)
             x0 = self.shortcut(x, dilation)
-            x = ConditionalBatchNorm()(x, scale, bias, train=train)
+            x = Affine()(x, z)
             x = nn.relu(x)
             x = nn.Conv(
                 features=self.ch,
@@ -74,19 +51,7 @@ class DilatedBlock(nn.Module):
                 padding="VALID",
                 use_bias=False,
             )(x)
-            x += x0
-        return x
-    
-    
-class MLP(nn.Module):
-    hidden_dim: int
-    output_dim: int
-    
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.output_dim)(x)
+            x = x0 + x * self.param(f"alpha_{i}", lambda _, shape: jnp.zeros(shape), (1,))
         return x
 
 
@@ -100,10 +65,10 @@ class DilatedDenseNet(nn.Module):
     def __post_init__(self) -> None:
         self.pad = self.num_blocks * (self.kernel_size - 1) * 2 ** self.depth
         self.p = self.pad // 2
-        dummy_xt = jnp.ones((1, self.pad + 1, 1))
+        dummy_x = jnp.ones((1, self.pad + 1, 2))
         dummy_t = jnp.ones((1,), dtype=jnp.int32)
-        self.dummy_args = (dummy_xt, dummy_t)
-        self.z_dim = self.ch * 2 * (self.depth + 1) * self.num_blocks
+        dummy_cond = jnp.ones((1, self.pad + 1, 1))
+        self.dummy_args = (dummy_x, dummy_t, dummy_cond)
         super().__post_init__()
 
     @nn.compact
@@ -111,16 +76,16 @@ class DilatedDenseNet(nn.Module):
         self,
         x: jax.Array,
         t: jax.Array,
-        *,
-        train: bool,
+        cond: jax.Array,
     ) -> jax.Array:
         ch_in = x.shape[-1]
-        cat = [x]
-        zs = MLP(self.hidden_dim, self.z_dim)(t.reshape(-1, 1))
-        for z in jnp.split(zs, self.num_blocks, axis=1):
-            cat.append(DilatedBlock(self.ch, self.depth, self.kernel_size)(cat[-1], z, train=train))
+        x = jnp.concatenate([x, cond], axis=-1)
+        cat = [nn.Conv(self.ch, kernel_size=(1,))(x)]
+        z = nn.relu(nn.Dense(self.hidden_dim)(t.reshape(-1, 1)))
+        for _ in range(self.num_blocks):
+            cat.append(DilatedBlock(self.ch, self.depth, self.kernel_size)(cat[-1], z))
         x = concat_ragged(*cat)
-        x = ConditionalBatchNorm()(x, train=train)  # No conditional scale and bias; use parameters.
+        x = Affine()(x, z)
         x = nn.relu(x)
         x = nn.Conv(features=ch_in, kernel_size=(1,))(x)
         return x

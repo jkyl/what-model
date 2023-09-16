@@ -5,41 +5,65 @@ import jax.numpy as jnp
 import flax.linen as nn
 import soundfile as sf
 
+from functools import partial
 from typing_extensions import Self
 from queue import Queue, Empty, Full
 from dataclasses import dataclass
+from typing import Optional, Tuple, Union
 
-from typing import Optional
-from omegaconf import DictConfig
+from ml_collections.config_dict import ConfigDict
 from scipy.datasets import electrocardiogram as ecg
 
-from common import batch_crops
 from diffusion import compose_diffusion_batch
 
 
-class WaveformDataset(nn.Module):
-    filename: Optional[str]
+def stereo_to_mid_side(x: jax.Array) -> jax.Array:
+    assert x.ndim == 2 and x.shape[1] == 2, x.shape
+    # Reflection about y=x.
+    M = (0.5 ** 0.5) * jnp.array([[1., 1.], [1., -1.]])
+    return x @ M
 
-    @staticmethod
-    def _init(_, filename: str) -> jax.Array:
-        if filename is not None:
-            data, _ = sf.read(filename)
-            data = data.mean(axis=1)
+
+# It's its own inverse (orthonormal).
+mid_side_to_stereo = stereo_to_mid_side
+
+
+@partial(jax.jit, static_argnums=(2, 3, 4))
+def batch_crops(data: jax.Array, starts: jax.Array, batch_size: int, length: int, p: int) -> jax.Array:
+    indices = starts[:, None] + jnp.arange(length)
+    batch = data[indices]
+    if p > 0:
+        mask = jnp.logical_or(indices < p, indices >= data.shape[0] - p)
+        return batch, mask[..., None]
+    return batch
+
+
+class WaveformDataset(nn.Module):
+    filename: Optional[str] = None
+    mono: bool = False
+    p: int = 0
+
+    def _init(self, _) -> jax.Array:
+        if self.filename is not None:
+            data, _ = sf.read(self.filename)
+            if data.ndim == 2 and self.mono:
+                data = stereo_to_mid_side(data)[:, :1]
+            if data.ndim == 1:
+                data = data[:, None]
         else:
-            data = ecg()
+            data = ecg()[:, None]
             
-        # Skip mean-subtraction because of digital black.
-        # data -= data.mean()
         data /= data.std()
-        return jnp.array(data, dtype=jnp.float32)
+        data = jnp.array(data, dtype=jnp.float32)
+        data = jnp.pad(data, ((self.p, self.p), (0, 0)))
+        return data
 
     @nn.compact
-    def __call__(self, batch_size: int, length: int, p: int = 0):
+    def __call__(self, batch_size: int, length: int) -> Union[jax.Array, Tuple[jax.Array, ...]]:
         rng = self.make_rng("crops")
-        data = self.param("data", self._init, self.filename)
-        starts = jax.random.randint(rng, (batch_size,), -p, data.size - length + p)
-        batch, mask = batch_crops(data, starts, length)
-        return batch[..., None], mask[..., None]
+        data = self.param("data", self._init)
+        starts = jax.random.randint(rng, (batch_size,), 0, data.shape[0] - length)
+        return batch_crops(data, starts, batch_size, length, self.p)
 
 
 @dataclass
@@ -47,7 +71,6 @@ class WaveformSampler:
     dataset: WaveformDataset
     batch_size: int
     length: int
-    p: int = 0
     
     @jax.default_device(jax.devices("cpu")[0])
     def __post_init__(self):
@@ -56,7 +79,7 @@ class WaveformSampler:
 
     @jax.default_device(jax.devices("cpu")[0])
     def __getitem__(self, rng: jax.Array):
-        return self.dataset.apply(self.params, self.batch_size, self.length, self.p, rngs={"crops": rng})
+        return self.dataset.apply(self.params, self.batch_size, self.length, rngs={"crops": rng})
 
 
 @dataclass
@@ -119,12 +142,20 @@ class WaveformDataLoader:
         return batch
 
     @classmethod
-    def from_config(cls, rng, config: DictConfig, fallbacks: dict) -> Self:
-        dataset = WaveformDataset(filename=config.filename)
+    def from_config(cls, rng, config: ConfigDict, fallbacks: dict) -> Self:
+        dataset = WaveformDataset(
+            filename=config.filename, 
+            mono=config.mono, 
+            p=config.p or fallbacks["p"],
+        )
         datagen = WaveformSampler(
             dataset,
             config.batch_size,
             config.length or fallbacks["length"],
-            config.p or fallbacks["p"],
         )
-        return cls(rng, datagen, config.num_threads, config.max_queue_length)
+        return cls(
+            rng, 
+            datagen, 
+            num_threads=config.num_threads, 
+            max_queue_length=config.max_queue_length,
+        )
