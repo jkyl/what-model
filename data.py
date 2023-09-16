@@ -18,10 +18,9 @@ from diffusion import compose_diffusion_batch
 
 
 def stereo_to_mid_side(x: jax.Array) -> jax.Array:
+    """Reflection about y=x."""
     assert x.ndim == 2 and x.shape[1] == 2, x.shape
-    # Reflection about y=x.
-    M = (0.5 ** 0.5) * jnp.array([[1., 1.], [1., -1.]])
-    return x @ M
+    return x @ ((jnp.sqrt(2) / 2) * jnp.array([[1., 1.], [1., -1.]]))
 
 
 # It's its own inverse (orthonormal).
