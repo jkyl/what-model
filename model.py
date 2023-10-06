@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
+from typing import Tuple
+
 
 class Affine(nn.Module):
 
@@ -47,15 +49,22 @@ class DilatedDenseNet(nn.Module):
     kernel_size: int
     num_blocks: int
     hidden_dim: int
+    stride: int
 
-    def __post_init__(self) -> None:
-        self.pad = self.num_blocks * (self.kernel_size - 1) * 2 ** self.depth
-        self.p = self.pad // 2
+    @property
+    def pad(self) -> int:
+        return self.stride * self.num_blocks * (self.kernel_size - 1) * 2 ** self.depth
+
+    @property
+    def p(self) -> int:
+        return self.pad // 2
+
+    @property
+    def dummy_args(self) -> Tuple[jax.Array, jax.Array, jax.Array]:
         dummy_x = jnp.ones((1, self.pad + 1, 2))
         dummy_t = jnp.ones((1,), dtype=jnp.int32)
         dummy_cond = jnp.ones((1, self.pad + 1, 1))
-        self.dummy_args = (dummy_x, dummy_t, dummy_cond)
-        super().__post_init__()
+        return dummy_x, dummy_t, dummy_cond
 
     @nn.compact
     def __call__(
@@ -66,11 +75,11 @@ class DilatedDenseNet(nn.Module):
     ) -> jax.Array:
         ch_in = x.shape[-1]
         x = jnp.concatenate([x, cond], axis=-1)
-        x = nn.Conv(self.ch, kernel_size=(1,))(x)
+        x = nn.Conv(self.ch, kernel_size=(self.stride,), strides=(self.stride,))(x)
         z = nn.relu(nn.Dense(self.hidden_dim)(t.reshape(-1, 1)))
         for _ in range(self.num_blocks):
             x = DilatedBlock(self.ch, self.depth, self.kernel_size)(x, z)
         x = Affine()(x, z)
         x = nn.relu(x)
-        x = nn.Conv(features=ch_in, kernel_size=(1,))(x)
+        x = nn.ConvTranspose(features=ch_in, kernel_size=(self.stride,), strides=(self.stride,))(x)
         return x
