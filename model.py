@@ -62,7 +62,7 @@ class DilatedDenseNet(nn.Module):
     @property
     def dummy_args(self) -> Tuple[jax.Array, jax.Array, jax.Array]:
         dummy_x = jnp.ones((1, self.pad + 1, 2))
-        dummy_t = jnp.ones((1,), dtype=jnp.int32)
+        dummy_t = jnp.ones((1,))
         dummy_cond = jnp.ones((1, self.pad + 1, 1))
         return dummy_x, dummy_t, dummy_cond
 
